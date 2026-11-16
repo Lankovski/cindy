@@ -1,3 +1,4 @@
+import { hasExternalClaude } from '../agent-binaries/external-claude.js';
 /**
  * apps/desktop/src/main/maker-ipc/binary-version.ts
  *
@@ -132,7 +133,7 @@ async function probeLocalVersion(
 
   // Pi is always live. checkLatest also skips the process cache so an in-place
   // self-update is compared against the manifest instead of a stale --version.
-  const cached = agentKind === 'pi' || options?.bypassCache ? undefined : versionCache.get(binaryPath);
+  const cached = agentKind === 'pi' || (agentKind === 'claude-code' && hasExternalClaude()) || options?.bypassCache ? undefined : versionCache.get(binaryPath);
   if (cached) {
     return { kind: agentKind, binaryPath, version: cached };
   }
@@ -178,7 +179,7 @@ export function registerMakerBinaryVersionIpc(): void {
 
       // The plain call never waits on the network, so About shows the local
       // version immediately even offline; the online comparison is a second call.
-      if (!checkLatest) {
+      if (!checkLatest || (agentKind === 'claude-code' && hasExternalClaude())) {
         return {
           ...(await probeLocalVersion(agentKind)),
           latestVersion: null,

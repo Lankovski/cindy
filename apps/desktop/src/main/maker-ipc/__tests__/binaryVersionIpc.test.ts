@@ -4,7 +4,7 @@
  * 普通调用不能等网络（离线时关于页要立刻显示本地版本）；checkLatest 只在线上
  * 版本严格更高时报告可更新，与启动安装「保留不旧于 manifest 的本地版本」同口径。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync } from 'node:fs';
 
 const h = vi.hoisted(() => ({
@@ -39,7 +39,8 @@ vi.mock('../../manifestService.js', () => ({
   getPlatformKey: () => 'darwin-arm64',
 }));
 vi.mock('../../agent-binaries/index.js', () => ({
-  getReadyBinaryPath: (kind: string) => `/managed/${kind}`,
+  getReadyBinaryPath: (kind: string) => kind === 'claude-code' && process.env.CINDY_CLAUDE_EXECUTABLE
+    ? process.env.CINDY_CLAUDE_EXECUTABLE : `/managed/${kind}`,
   getCachedBinaryStatus: () => ({ binaryReady: false, binaryPath: null }),
   isVettedAgentBinaryPath: () => true,
 }));
@@ -63,6 +64,18 @@ function invoke(kind: unknown, options?: unknown) {
 }
 
 describe('maker:agent:binary-version', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('re-probes an external wrapper without offering managed updates', async () => {
+    vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', '/fixture/claude');
+    h.versions.set('/fixture/claude', '2.1.325 (Claude Code)');
+    await expect(invoke('claude-code', { checkLatest: true })).resolves.toMatchObject({
+      version: '2.1.325 (Claude Code)', latestVersion: null, updateAvailable: false,
+    });
+    h.versions.set('/fixture/claude', '2.1.326 (Claude Code)');
+    await expect(invoke('claude-code')).resolves.toMatchObject({ version: '2.1.326 (Claude Code)' });
+    expect(h.fetchManifest).not.toHaveBeenCalled();
+  });
   // Unit regression: the IPC previously spawned Codex outside the startup probe's
   // environment boundary. Check the actual handler's child env and cleanup.
   it('isolates the About version query from the user Codex home', async () => {
@@ -80,6 +93,7 @@ describe('maker:agent:binary-version', () => {
   });
 
   beforeEach(() => {
+    vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', undefined);
     h.handlers.clear();
     h.fetchManifest.mockReset();
     h.versions.clear();

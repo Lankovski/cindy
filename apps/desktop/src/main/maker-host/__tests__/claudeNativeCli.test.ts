@@ -4,7 +4,7 @@
  */
 import { EventEmitter } from 'node:events';
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const h = vi.hoisted(() => ({
   binary: '/opt/cindy/claude' as string | null,
@@ -104,6 +104,7 @@ function argsOf(call: unknown[]): string[] {
 }
 
 beforeEach(() => {
+  vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', undefined);
   resetClaudeNativeCliForTest();
   h.binary = '/opt/cindy/claude';
   h.envProxy = false;
@@ -114,6 +115,8 @@ beforeEach(() => {
   h.spawn.mockReset();
   h.workers.length = 0;
 });
+
+afterEach(() => vi.unstubAllEnvs());
 
 describe('parseClaudeCliLoginStatus', () => {
   // Unit: official auth status already exposes the tier, but our parser discarded it.
@@ -173,6 +176,12 @@ describe('parseClaudeCliLoginStatus', () => {
 });
 
 describe('claudeCliNetworkEnv', () => {
+  it('leaves proxy ownership to an explicit wrapper even when the system uses SOCKS', async () => {
+    vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', '/fixture/claude');
+    h.resolved = 'socks5://127.0.0.1:7890';
+    await expect(claudeCliNetworkEnv()).resolves.toEqual({});
+    expect(h.bridge).not.toHaveBeenCalled();
+  });
   it('代理 env 已给出 HTTP 代理:不动,子进程直接继承', async () => {
     h.envProxy = true;
     h.resolved = 'http://127.0.0.1:7890';

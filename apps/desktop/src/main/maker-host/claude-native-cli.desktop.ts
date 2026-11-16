@@ -1,4 +1,5 @@
 /** Desktop adapters for the shared official CLI lifecycle. */
+import { hasExternalClaude } from '../agent-binaries/external-claude.js';
 import { getReadyBinaryPath } from '../agent-binaries/index.js';
 import { resolveDesktopOutboundProxy } from './outbound-proxy-resolver.js';
 import { readClaudeCliStatusInWorker } from './claudeCliStatusWorkerClient.js';
@@ -9,6 +10,6 @@ export { onClaudeCliLoginStatusChange, peekClaudeCliLoginStatus, type ClaudeCliL
 export type { ClaudeCliPlanUsage, ClaudeCliLoginResult } from './claude-native-cli.js';
 export const { claudeCliNetworkEnv, refreshClaudeCliLoginStatus, readClaudeCliLoginStatus, readClaudeCliPlanUsage, parseClaudeCliPlanUsageLine, beginClaudeCliLogin, cancelClaudeCliLogin, runClaudeCliLogin, resetClaudeNativeCliForTest } = createClaudeNativeCli({
   binaryPath: () => getReadyBinaryPath('claude-code') ?? null,
-  resolveOutboundProxy: resolveDesktopOutboundProxy,
+  resolveOutboundProxy: url => hasExternalClaude() ? null : resolveDesktopOutboundProxy(url),
   readStatus: async options => parseClaudeCliLoginStatus(await readClaudeCliStatusInWorker(options)),
 });

@@ -8,7 +8,7 @@
  *   - 独立 Claude 账号已停用,不递凭证;
  *   - gateway-key / provider-oauth 形态保持原样。
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildClaudeEnv } from '../../../../../../packages/maker-core/src/agents/claude-code/env-builder.js';
 
 const h = vi.hoisted(() => ({
@@ -136,7 +136,9 @@ const CREDENTIAL_KEYS = [
 ] as const;
 
 describe('DesktopClaudeAuthAdapter — Claude 订阅只经 CLI 自己的登录', () => {
+  afterEach(() => vi.unstubAllEnvs());
   beforeEach(() => {
+    vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', undefined);
     h.nativeLogin = true;
     h.bound = true;
     h.gatewayKey = 'sk-xd-gateway';
@@ -164,6 +166,26 @@ describe('DesktopClaudeAuthAdapter — Claude 订阅只经 CLI 自己的登录',
   async function makeAdapter() {
     return new mod.DesktopClaudeAuthAdapter();
   }
+
+  // The wrapper intentionally strips gateway credentials. Do not report a gateway
+  // login as usable, or inject Cindy's network bridge into this subscription path.
+  it('uses native subscription with an external wrapper even when a gateway key exists', async () => {
+    vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', '/fixture/claude');
+    h.networkEnv = { HTTPS_PROXY: 'http://127.0.0.1:5555' };
+    const adapter = await makeAdapter();
+    await expect(adapter.getState()).resolves.toMatchObject({ authenticated: true, authSource: 'oauth' });
+    await expect(adapter.getAuthEnv()).resolves.toEqual({});
+    for (const options of [
+      { credentialMode: 'gateway-key' as const },
+      { credentialMode: 'provider-oauth' as const },
+      { providerId: 'openai' },
+      { model: 'gpt-5' },
+      { nativeSubscriptionAccount: { id: 'second', configDir: '/fixture/second', assertCurrent() {}, readState: async () => ({ authenticated: true }) } },
+    ]) {
+      await expect(adapter.getState(options)).rejects.toThrow('default local Claude subscription');
+      await expect(adapter.getAuthEnv(options)).rejects.toThrow('default local Claude subscription');
+    }
+  });
 
   it('订阅会话:已连接即授权,且 getAuthEnv 不递任何凭证(只补代理 env)', async () => {
     h.networkEnv = { HTTPS_PROXY: 'http://127.0.0.1:7890' };

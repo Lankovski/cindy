@@ -81,6 +81,7 @@ beforeAll(() => {
   tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cindy-startup-policy-'));
 });
 beforeEach(async () => {
+  vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', undefined);
   mocks.userDataDir = path.join(tempRoot, 'user-data');
   mocks.isPackaged = true;
   mocks.systemCommands.clear();
@@ -124,12 +125,44 @@ beforeEach(async () => {
   await reloadBinaries();
 });
 afterEach(() => {
+  vi.unstubAllEnvs();
   fs.rmSync(mocks.userDataDir, { recursive: true, force: true });
   Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
 });
 afterAll(() => { fs.rmSync(tempRoot, { recursive: true, force: true }); });
 
 describe('shared startup policy through the real binary preparation chain', () => {
+  // Unit regression: external wrappers must win over installed/CDN binaries in
+  // both dev and packaged builds, including explicit update/repair requests.
+  it.each([false, true])('preserves an external Claude wrapper (packaged=%s)', async packaged => {
+    mocks.isPackaged = packaged;
+    installManaged('claude-code');
+    const wrapper = writeExecutable(path.join(mocks.userDataDir, 'wrapper with spaces', 'claude'), '#!/bin/sh\nexit 0\n');
+    vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', wrapper);
+    await expect(binaries.prepare('claude-code', { ...quiet, checkForUpdates: true }))
+      .resolves.toMatchObject({ ready: true, path: wrapper, downloaded: false });
+    expect(binaries.getReadyBinaryPath('claude-code')).toBe(wrapper);
+    expect(binaries.getCachedBinaryStatus('claude-code')).toMatchObject({ binaryReady: true, binaryPath: wrapper });
+    await expect(binaries.prefetch('claude-code', { manifest: mocks.remoteManifest! })).resolves.toBe(false);
+    await expect(binaries.peekNeedsDownload('claude-code')).resolves.toBe(false);
+    fs.unlinkSync(wrapper);
+    await expect(binaries.prepare('claude-code', quiet)).resolves.toMatchObject({ ready: false });
+    expect(binaries.getCachedBinaryStatus('claude-code').binaryReady).toBe(false);
+    // Keep the explicit path so SDK callers cannot fall back to their bundled CLI.
+    expect(binaries.getReadyBinaryPath('claude-code')).toBe(wrapper);
+    expect(mocks.download).not.toHaveBeenCalled();
+    expect(mocks.fetchManifest).not.toHaveBeenCalled();
+    expect(mocks.execFile).not.toHaveBeenCalled();
+  });
+
+  it.each(['', 'relative/claude', '/missing/cindy-test-wrapper'])('fails closed for invalid external selection %j', async selected => {
+    installManaged('claude-code');
+    vi.stubEnv('CINDY_CLAUDE_EXECUTABLE', selected);
+    await expect(binaries.prepare('claude-code', quiet)).resolves.toMatchObject({ ready: false });
+    expect(mocks.download).not.toHaveBeenCalled();
+    expect(mocks.fetchManifest).not.toHaveBeenCalled();
+  });
+
   // Public index -> cache -> original installer. Windows has an .exe entrypoint;
   // Linux can start from a system CLI. Existing tests had no background/next-start
   // handoff. Tier: unit, real local archives with a fake network.

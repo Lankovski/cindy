@@ -1,3 +1,4 @@
+import { hasExternalClaude, assertExternalClaudeSubscription } from '../agent-binaries/external-claude.js';
 import { chatgptAccountIdFromIdToken, chatgptAccountIdFromTokens, currentCodexCredentialGeneration, captureCodexOAuthDispatchProof, parseCodexCredentialGeneration } from './codexCredentialRead.js';
 export { chatgptAccountIdFromIdToken, chatgptAccountIdFromTokens } from './codexCredentialRead.js';
 import { readCodexLocalAuthState } from './codex-local-auth-state.js';
@@ -580,6 +581,11 @@ export class DesktopClaudeAuthAdapter implements AuthAdapter {
   }
 
   async getState(options?: AuthAdapterOptions): Promise<AuthState> {
+    if (hasExternalClaude()) {
+      assertExternalClaudeSubscription(options, claudeSubscriptionServesModel(options?.model));
+      return options?.nativeSubscriptionAccount
+        ? options.nativeSubscriptionAccount.readState() : claudeNativeLoginState();
+    }
     if (options?.nativeSubscriptionAccount && options.providerId === 'openai' && !isAnthropicCompatProxyHandleReady())
       return { authenticated: false, errorReason: 'proxy_not_ready' };
     if (options?.nativeSubscriptionAccount) return options.nativeSubscriptionAccount.readState();
@@ -644,6 +650,14 @@ export class DesktopClaudeAuthAdapter implements AuthAdapter {
   }
 
   async getAuthEnv(options?: AuthAdapterOptions): Promise<Record<string, string>> {
+    if (hasExternalClaude()) {
+      assertExternalClaudeSubscription(options, claudeSubscriptionServesModel(options?.model));
+      options?.nativeSubscriptionAccount?.assertCurrent();
+      markClaudeSessionObserved();
+      await this.ensureSharedGlobalSkills();
+      options?.nativeSubscriptionAccount?.assertCurrent();
+      return {}; // The wrapper owns network environment and the default CLI login.
+    }
     // 即将拉起 Claude CLI = 用户在用 Claude：打开 #9282 的投影门（含首次、
     // ~/.claude 尚不存在的会话），再走共享 skills 预热。
     markClaudeSessionObserved();

@@ -1,3 +1,4 @@
+import { externalClaudePath, hasExternalClaude, validateExternalClaude } from './external-claude.js';
 import { createPiKernelManager, type PiKernelManager } from './pi-kernel-manager.js';
 /**
  * apps/desktop/src/main/agent-binaries/index.ts
@@ -267,6 +268,7 @@ export async function updateReadyPiBinary(force: boolean): Promise<string> {
 }
 
 export function getReadyBinaryPath(kind: AgentBinaryKind): string | undefined {
+  if (kind === 'claude-code' && hasExternalClaude()) return externalClaudePath();
   return lastReadyPath.get(kind);
 }
 
@@ -275,6 +277,7 @@ export async function prefetch(
   kind: AgentBinaryKind,
   opts: { manifest?: Manifest; signal?: AbortSignal } = {},
 ): Promise<boolean> {
+  if (kind === 'claude-code' && hasExternalClaude()) return false;
   if (!app.isPackaged) return false;
   // An explicit Pi selection (including an intentional downgrade) is authoritative.
   if (kind === 'pi' && getPiKernelManager().hasSelection()) {
@@ -313,6 +316,13 @@ function formatBytes(bytes: number): string {
 // ── 同步快查 (不触发下载) ────────────────────────────────────────────────────
 
 export function getCachedBinaryStatus(kind: AgentBinaryKind): CachedBinaryStatus {
+  if (kind === 'claude-code' && hasExternalClaude()) {
+    try {
+      const binaryPath = externalClaudePath();
+      return lastReadyPath.get(kind) === binaryPath
+        ? { binaryReady: true, binaryPath } : { binaryReady: false };
+    } catch { return { binaryReady: false }; }
+  }
   const cfg = CONFIG[kind];
   const cachedReadyPath = lastReadyPath.get(kind);
   // dev:优先查仓库本地 runtime(apps/<devBinDir>/<platform>/<devBinaryName>)。
@@ -348,6 +358,16 @@ export async function prepare(
 ): Promise<PrepareResult> {
   const cfg = CONFIG[kind];
   const { step, totalSteps, broadcastProgress = true, broadcastFailure = true } = opts;
+  if (kind === 'claude-code' && hasExternalClaude()) {
+    lastReadyPath.delete(kind);
+    try {
+      const selected = await validateExternalClaude();
+      lastReadyPath.set(kind, selected);
+      return { ready: true, path: selected, downloaded: false };
+    } catch (error) {
+      return { ready: false, error: `external_claude_unavailable: ${String(error)}`, downloaded: false };
+    }
+  }
 
   if (kind === 'pi') {
     try {
@@ -712,6 +732,7 @@ export async function peekNeedsDownload(
   kind: AgentBinaryKind,
   opts: Pick<PrepareOpts, 'checkForUpdates'> = {},
 ): Promise<boolean> {
+  if (kind === 'claude-code' && hasExternalClaude()) return false;
   // dev 模式永不下载 (findDevBinary 命中 / 缺失都不走 OSS)
   if (!app.isPackaged) return false;
   opts = { ...opts, checkForUpdates: resolveUpdateCheck(kind, opts.checkForUpdates) };
@@ -742,6 +763,10 @@ export async function peekNeedsDownload(
 }
 
 export async function getInstallState(kind: AgentBinaryKind): Promise<VendorRuntimeState> {
+  if (kind === 'claude-code' && hasExternalClaude()) {
+    const status = getCachedBinaryStatus(kind);
+    return { status: status.binaryReady ? 'ready' : 'failed', binaryPath: status.binaryPath };
+  }
   return getBase(kind).getState();
 }
 
