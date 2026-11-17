@@ -410,6 +410,7 @@ export default {
             'src/main/local-agent/__tests__/*.integration.test.ts',
             'src/main/bot-import/__tests__/skillArchive.integration.test.ts',
             'src/main/maker-host/__tests__/hostPiPackagesParity.integration.test.ts',
+            'src/main/maker-host/__tests__/strict-claude-tools.integration.test.ts',
           ],
         },
         'git-integration': {

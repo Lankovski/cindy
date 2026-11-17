@@ -1,3 +1,5 @@
+import { hasExternalClaude, externalClaudePath } from '../agent-binaries/external-claude.js';
+import { createStrictClaudeTools, STRICT_CLAUDE_TOOL_NAMES } from './strict-claude-tools.js';
 import { createCodexLocalModelSink } from './codexLocalModelSink.js';
 import { createCodexSpawnConfig, createCodexRoutingSignature } from './codexSpawnConfigCore.js';
 import { refreshCodexGatewayRuntime } from './codexGatewayRefresh.js';
@@ -1474,6 +1476,12 @@ export function getMaker(): Maker {
       log: desktopMakerLogger.child('command-gate'),
     });
     const claudeAgent = new ClaudeCodeAgent({
+      get claudeToolIsolation() {
+        return hasExternalClaude() ? {
+          provider: createStrictClaudeTools([externalClaudePath()!, path.dirname(process.execPath), path.resolve(__dirname, '../../../..')]),
+          toolNames: STRICT_CLAUDE_TOOL_NAMES,
+        } : undefined;
+      },
       resolveLocalMcpDuplicateChoices,
       resolveSessionEnvironment: resolveCompanionRuntimeEnvironment,
       getDisabledSkillPaths: readDisabledSkillPaths,

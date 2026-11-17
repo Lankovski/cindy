@@ -1,3 +1,4 @@
+import { isolatedClaudeOptions, isolatedClaudeSettings } from './tool-isolation.js';
 /**
  * ClaudeCodeAgent — Claude Code 的 maker-core 一等公民实现。
  *
@@ -1123,6 +1124,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           cwd: probeDir,
           pathToClaudeCodeExecutable: this.deps.binaryPath,
           env,
+          ...(this.deps.claudeToolIsolation ? { ...isolatedClaudeOptions(), settings: isolatedClaudeSettings(), mcpServers: {} } : {}),
         },
       });
       const query = q;
@@ -1262,6 +1264,7 @@ export class ClaudeCodeAgent extends BaseAgent {
    * (如起标题 IPC) 自己 try/catch 返空串, 不在 agent 里 swallow。
    */
   async oneShot(prompt: string, opts?: OneShotOptions): Promise<string> {
+    if (this.deps.claudeToolIsolation) throw new Error('Host-side Claude auxiliary requests are disabled in strict mode');
     const log = this.deps.logger.child('claude-code/oneShot');
     const model = opts?.model ?? 'claude-haiku-4-5';
     const maxTokens = opts?.maxTokens ?? 100;
@@ -1402,6 +1405,10 @@ export class ClaudeCodeAgent extends BaseAgent {
     const sid = opts.sessionId ?? '';
     const log = this.deps.logger.child(sid ? `s:${sid}/claude-code` : 'claude-code');
     const reviewMode = opts.reviewMode === true;
+    const toolIsolation = this.deps.claudeToolIsolation;
+    if (toolIsolation && (opts.remoteHostId || opts.deviceHosted || opts[LOCAL_AGENT_CLIENT] || opts.botRuntimeProfile)) {
+      throw new Error('Strict Claude mode supports local tasks only; delegation and remote tools are disabled');
+    }
     // The routing policy this session actually runs under: user-registered MCP denials
     // (cua-driver → cindy_computer) apply to local runtimes only; see withoutUserMcpRoutes.
     const capabilityRouting = opts.remoteHostId
@@ -1708,7 +1715,7 @@ export class ClaudeCodeAgent extends BaseAgent {
     // 用户自己设过 MCP_TIMEOUT 时以用户为准。
     if (hosted && !env.MCP_TIMEOUT) env.MCP_TIMEOUT = String(DEVICE_HOSTED_MCP_TIMEOUT_MS);
     // Input handoff askpass for this owner's own local tasks only.
-    if (!opts.remoteHostId && !hosted && !reviewMode && opts.sessionId) {
+    if (!toolIsolation && !opts.remoteHostId && !hosted && !reviewMode && opts.sessionId) {
       Object.assign(env, this.deps.runtimeConfig.taskShellEnv?.({ sessionId: opts.sessionId }));
     }
     if (guestRouteHeader) {
@@ -1764,7 +1771,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       : this.deps.runtimeConfig.systemPrompt;
     // 设备托管(含受邀者)用任务所在电脑给的花名册：插件工具在那台，本机装的插件不进这个任务。
     const localGhostRoster = () => this.deps.getGhostRosterPrompt?.({ workingDir: opts.workingDir }) ?? '';
-    const ghostRosterPrompt = opts.remoteHostId || reviewMode || isolatedBotProfile(opts.botRuntimeProfile)
+    const ghostRosterPrompt = toolIsolation || opts.remoteHostId || reviewMode || isolatedBotProfile(opts.botRuntimeProfile)
       ? ''
       : hosted
         ? deviceHostedGhostRoster(hosted, opts.ghostRosterSnapshot, localGhostRoster)
@@ -1823,7 +1830,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           });
     // opts.makerMemoryEnabled 优先 (per-session, renderer 透传); fallback 到 runtimeConfig
     // (host 静态配置, 一般 undefined)。manager 没注入视为禁用。
-    const makerMemoryFlag = reviewMode
+    const makerMemoryFlag = toolIsolation || reviewMode
       ? false
       : opts.makerMemoryEnabled ?? this.deps.runtimeConfig.makerMemoryEnabled ?? false;
     const makerMemory = this.deps.makerMemory;
@@ -1861,7 +1868,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       }
     }
 
-    const mcpProviders = reviewMode ? [] : this.deps.mcpProviders ?? [];
+    const mcpProviders = toolIsolation ? [toolIsolation.provider] : reviewMode ? [] : this.deps.mcpProviders ?? [];
     // host-owned 只读白名单在 session 启动时快照; 与 hooks / MCP 注册同样保持整条
     // 会话稳定, 避免中途改数组导致 CLI 权限规则与 prompt cache 前缀漂移。
     const claudeAllowedTools = reviewMode
@@ -2520,6 +2527,9 @@ export class ClaudeCodeAgent extends BaseAgent {
     // 注: destructive guard(agentManager.ts:1054-1065)只在 feishuBot session 启用; chat 默认 OFF,
     // 本轮不在 maker-core 实现; 若未来需要按 session opt-in, 通过 vendorOptions 传入 guard 函数。
     const canUseTool: CanUseTool = async (toolName, input, options) => {
+      if (toolIsolation && !toolIsolation.toolNames.includes(toolName)) {
+        return { behavior: 'deny', message: 'Tool unavailable in strict Claude mode' };
+      }
       // SDK 不保证 assistant message 先于 canUseTool yield, 冗余 add (Set 幂等),
       // 顺便覆盖 AskUserQuestion / ExitPlanMode 等用户交互期间不计 idle 配额。
       if (typeof options.toolUseID === 'string' && options.toolUseID.length > 0) {
@@ -3014,6 +3024,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         // 受邀者不走订阅直连，env 里有 CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST，CLI 会从所有
         // settings 来源的 env 里剥掉 ANTHROPIC_CUSTOM_HEADERS（见 env-builder 第三道防线）。
       }
+      if (toolIsolation) return isolatedClaudeSettings(settings);
       if (!reviewMode) return settings;
       return {
         ...settings,
@@ -3140,7 +3151,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       };
       let key: string | undefined;
       let pending: Promise<AutoReviewDecision> | undefined;
-      return withAutoReviewContext(request, this.deps.reviewAutoPermissionAction, (prepared) => {
+      return withAutoReviewContext(request, toolIsolation ? undefined : this.deps.reviewAutoPermissionAction, (prepared) => {
         if (request.userIntent !== currentAutoReviewIntent || request.authorizationContext !== (currentAutoReviewAuthority ?? undefined)) {
           return Promise.resolve({ verdict: 'block', reason: 'User instructions changed; retry against the current request.' });
         }
@@ -3148,7 +3159,7 @@ export class ClaudeCodeAgent extends BaseAgent {
         const cached = autoReviewDecisionCache.get(key);
         pending = cached ?? resolveAutoReviewDecision(
             prepared,
-            this.deps.reviewAutoPermissionAction,
+            toolIsolation ? undefined : this.deps.reviewAutoPermissionAction,
             hostAutoApprove,
             hostShortcutOnly,
           );
@@ -3198,7 +3209,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       }), {
         // 供应商分享受邀者同样复核：与本机自己的任务一样走本机(分享者)的辅助模型链
         // (2026-10-13 用户裁决)。
-        reviewer: this.deps.toolLoopReviewer,
+        reviewer: toolIsolation ? undefined : this.deps.toolLoopReviewer,
         reviewBudget: toolLoopReviewBudget,
         context: () => ({
           sessionId: sid,
@@ -3248,6 +3259,7 @@ export class ClaudeCodeAgent extends BaseAgent {
     // 官方 Claude OAuth 路由保留 CC 原生 Auto classifier。第三方/网关路由及原生
     // classifier 故障后的会话映射到 default，使 canUseTool 回调进入 Cindy 轻量 fallback。
     const toSdkPermissionMode = (mode: PermissionMode): SdkPermissionMode => {
+      if (toolIsolation) return mode === 'plan' ? 'plan' : 'default';
       if (mode === 'auto') return usesNativeClaudeAutoReview() ? 'auto' : 'default';
       return (mode === 'ask' ? 'default' : mode) as SdkPermissionMode;
     };
@@ -3805,7 +3817,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       const finalResumeAt = extra?.fresh ? undefined : (extra?.resumeSessionAt ?? baseResumeAt);
       const finalFork = extra?.fresh ? false : (extra?.forkSession ?? baseFork);
       duplicateMcpChoices = { skipHostServers: [], denyNativeServers: [] };
-      if (!reviewMode && !isolatedBotProfile(opts.botRuntimeProfile) && !opts.remoteHostId && !hosted && !opts[LOCAL_AGENT_CLIENT]) {
+      if (!toolIsolation && !reviewMode && !isolatedBotProfile(opts.botRuntimeProfile) && !opts.remoteHostId && !hosted && !opts[LOCAL_AGENT_CLIENT]) {
         try {
           duplicateMcpChoices = await this.deps.resolveLocalMcpDuplicateChoices?.({ workingDir: opts.workingDir, env })
             ?? duplicateMcpChoices;
@@ -4477,7 +4489,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       // 受邀者(另一个账号)的托管会话不带本机安装的托管技能(属于本机用户与其组织)。
       // 任务所在电脑提供了托管技能时以它为准(工具也在那台执行)，本机的一律不加载。
       const controllerManagedSkills = reviewMode ? undefined : hosted?.controllerManagedSkills;
-      const managedSkills = !reviewMode && !hosted?.guest && !controllerManagedSkills && !opts[LOCAL_AGENT_CLIENT]?.hostToolsOnly && this.deps.getManagedSkills
+      const managedSkills = !toolIsolation && !reviewMode && !hosted?.guest && !controllerManagedSkills && !opts[LOCAL_AGENT_CLIENT]?.hostToolsOnly && this.deps.getManagedSkills
         ? await this.deps.getManagedSkills() : [];
       const managedDisabledPaths = currentDisabledSkillLaunchPaths(managedDisabledSkillLaunch);
       const allowedManagedSkills = resolveAllowedManagedSkills(managedSkills, managedSkillGrants, managedDisabledPaths);
@@ -4698,6 +4710,7 @@ export class ClaudeCodeAgent extends BaseAgent {
           ...(Object.keys(localClaudeHooks).length > 0
             ? { hooks: localClaudeHooks }
             : {}),
+          ...(toolIsolation ? isolatedClaudeOptions() : {}),
         },
       });
       let query: Query;
@@ -4750,7 +4763,7 @@ export class ClaudeCodeAgent extends BaseAgent {
       }
       if (sdkStartPermissionMode === 'auto') nativeAutoQueries.add(query);
       if (modelUsageCumulativeStartsAtZero) modelUsageStartsAtZeroQueries.add(query);
-      if (nativeCliAuth && typeof query.applyFlagSettings === 'function') {
+      if ((nativeCliAuth || toolIsolation) && typeof query.applyFlagSettings === 'function') {
         // 切模型 / effort / fast 走 applyFlagSettings,CLI 会借机全量重读设置(不经 ConfigChange):
         // 先复查工作区,命中就结束会话而不是把设置应用进去。
         const applyFlagSettings = query.applyFlagSettings.bind(query);
@@ -4761,7 +4774,8 @@ export class ClaudeCodeAgent extends BaseAgent {
             taintWorkspaceSettings(message);
             throw new Error(message);
           }
-          return applyFlagSettings(opts.fastModePolicy?.isAllowed() === false ? { ...settings, fastMode: false } : settings);
+          const nextSettings = opts.fastModePolicy?.isAllowed() === false ? { ...settings, fastMode: false } : settings;
+          return applyFlagSettings(toolIsolation ? { ...nextSettings, ...isolatedClaudeSettings() } : nextSettings);
         };
       }
       if (newSdkSessionId && localQueryStarted && !unacceptedForks.has(query)) {

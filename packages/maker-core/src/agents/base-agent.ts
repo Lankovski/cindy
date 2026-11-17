@@ -1449,6 +1449,12 @@ export interface AgentDeps {
    */
   claudeAllowedTools?: readonly string[];
 
+  /** Host-enforced restricted local Claude runtime. Never supplied by tool input. */
+  claudeToolIsolation?: {
+    provider: McpProvider;
+    toolNames: readonly string[];
+  };
+
   /**
    * Claude 专用 SDK hook 注入点。host 在构造 ClaudeCodeAgent 时按 HookEvent
    * (PreToolUse / PostToolUse / UserPromptSubmit / SessionStart / ...) 注册一组

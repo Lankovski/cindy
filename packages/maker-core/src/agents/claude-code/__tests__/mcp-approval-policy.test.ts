@@ -192,6 +192,7 @@ async function startSession(
   policy?: (context: McpToolApprovalContext) => McpToolApprovalPolicy,
   options?: {
     mcpServerNames?: readonly string[];
+    isolation?: AgentDeps['claudeToolIsolation'];
     /** 覆盖 resolver 的决策；默认简单 allow。返回 undefined 表示挂起不决策。 */
     decide?: (req: InteractionRequest) => InteractionDecision | undefined;
     /** true 时不注入 resolver，用于验证 fail-closed 分支。 */
@@ -222,10 +223,12 @@ async function startSession(
     options?.failedInitMcpServerNames,
     options?.mcpServerStatuses,
   );
+  const originalApplyFlagSettings = fakeQuery.applyFlagSettings;
   sdkMock.query.mockReturnValue(fakeQuery);
 
   const deps = createDeps(policy, options?.mcpServerNames);
   deps.capabilityRouting = options?.capabilityRouting;
+  deps.claudeToolIsolation = options?.isolation;
   deps.turnChangeCapture = options?.turnChangeCapture;
   deps.reviewAutoPermissionAction = options?.reviewAutoPermissionAction;
   deps.resolveClaudeSubagentModelAccess = options?.resolveClaudeSubagentModelAccess;
@@ -268,6 +271,7 @@ async function startSession(
     agent,
     handle,
     canUseTool: queryOptions.canUseTool,
+    originalApplyFlagSettings,
     hooks: queryOptions.hooks,
     env: queryOptions.env,
     seen,
@@ -1366,6 +1370,7 @@ describe('remote sessions share the same permission semantics', () => {
       attachResolver?: (req: InteractionRequest) => InteractionDecision;
       capabilityRouting?: CapabilityRoutingPolicy;
       mcpServerNames?: readonly string[];
+      isolation?: AgentDeps['claudeToolIsolation'];
       permissionMode?: PermissionMode;
       initMcpServerNames?: readonly string[];
       failedInitMcpServerNames?: readonly string[];
@@ -1383,6 +1388,7 @@ describe('remote sessions share the same permission semantics', () => {
     const deps = createDeps(policy);
     deps.getGhostRosterPrompt = options?.getGhostRosterPrompt;
     deps.capabilityRouting = options?.capabilityRouting;
+    deps.claudeToolIsolation = options?.isolation;
     deps.resolveClaudeSubagentModelAccess = options?.resolveClaudeSubagentModelAccess;
     deps.reviewAutoPermissionAction = options?.reviewAutoPermissionAction;
     // 远端只装得到 stdio / sse / http 类 server —— in-process 的会被 filter 掉。
@@ -2131,5 +2137,37 @@ describe('remote sessions apply host-disabled built-in surfaces', () => {
         ?.settings?.deniedMcpServers,
     ).toEqual([{ serverName: 'claude.ai Claude Docs' }]);
     await handle.close();
+  });
+});
+
+// Strict host isolation must survive Full access and mutable provider registries.
+// Existing approval tests cover consent, not the process boundary (unit tier).
+describe('strict Claude tool isolation', () => {
+  it('exposes only isolated tools and denies old host/native tools even in Full access', async () => {
+    const tool = 'mcp__restricted__command';
+    const isolation = { provider: createMcpProviders(['restricted'])[0]!, toolNames: [tool] };
+    const { handle, canUseTool, agent, originalApplyFlagSettings } = await startSession(undefined, { permissionMode: 'bypassPermissions', isolation });
+    try {
+      const options = sdkMock.query.mock.calls.at(-1)![0].options;
+      expect(Object.keys(options.mcpServers)).toEqual(['restricted']);
+      expect(options.tools).toEqual([]);
+      expect(options.settingSources).toEqual([]);
+      expect(options.plugins).toEqual([]);
+      expect(options.strictMcpConfig).toBe(true);
+      expect(options.settings.disableAllHooks).toBe(true);
+      expect(options.settings.disableClaudeAiConnectors).toBe(true);
+      expect(options.permissionMode).toBe('default');
+      expect(options.hooks).toEqual({});
+      for (const name of ['Bash', 'Agent', 'mcp__cindy_browser__call_tool', 'mcp__restricted__unknown']) {
+        expect((await canUseTool(name, {}, { toolUseID: name })).behavior).toBe('deny');
+      }
+      expect((await canUseTool(tool, { command: 'true' }, { toolUseID: 'allowed' })).behavior).toBe('allow');
+      const query = sdkMock.query.mock.results.at(-1)!.value;
+      await query.applyFlagSettings({ disableAllHooks: false, disableRemoteControl: false, enabledPlugins: { unsafe: true } });
+      expect(originalApplyFlagSettings).toHaveBeenLastCalledWith(expect.objectContaining({ disableAllHooks: true, disableRemoteControl: true, enabledPlugins: {} }));
+      await handle.setPermissionMode('bypassPermissions');
+      expect(query.setPermissionMode).not.toHaveBeenCalledWith('bypassPermissions');
+      await expect(agent.oneShot('no direct request')).rejects.toThrow('disabled in strict mode');
+    } finally { await handle.close(); }
   });
 });
