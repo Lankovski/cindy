@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { rootCertificates } from 'node:tls';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import type { McpProvider } from '@cindy/maker-core';
@@ -61,6 +62,18 @@ export async function runStrictClaudeTool(
   }
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'cindy-strict-tools-')));
   try {
+    let caFile: string | undefined;
+    if (tool === 'web_fetch') {
+      // curl cannot consult macOS trust services inside the tool sandbox. Use
+      // Node's bundled Mozilla roots, never task files or inherited CA overrides.
+      // Every strict worker already denies writes to .cindy paths, including
+      // concurrent command workers whose task directory contains this temp dir.
+      if (rootCertificates.length === 0) throw new Error('Trusted CA bundle unavailable');
+      const trustDir = path.join(temporary, '.cindy');
+      await fs.mkdir(trustDir, { mode: 0o700 });
+      caFile = path.join(trustDir, 'web-fetch-ca.pem');
+      await fs.writeFile(caFile, rootCertificates.join('\n') + '\n', { mode: 0o400, flag: 'wx' });
+    }
     const protectedPaths = [
       ...['.claude', '.local', '.codex', '.config', '.ssh', 'Library'].map(p => path.join(home, p)),
       ...options.protectedPaths,
@@ -108,7 +121,7 @@ export async function runStrictClaudeTool(
         else if (code !== 0) reject(new Error(`Strict tool failed (${code}): ${output.slice(0, 8192)}`));
         else resolve(output);
       });
-      child.stdin.end(JSON.stringify({ tool, args, root }));
+      child.stdin.end(JSON.stringify({ tool, args, root, caFile }));
     });
   } finally {
     await fs.rm(temporary, { recursive: true, force: true });

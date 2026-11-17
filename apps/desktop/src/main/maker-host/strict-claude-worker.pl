@@ -66,9 +66,14 @@ if ($tool eq 'read_file') {
 } elsif ($tool eq 'web_fetch') {
     my $url = $args->{url};
     die "Only HTTP(S) URLs are supported\n" unless $url =~ m{^https?://}i;
+    # Only the host supplies this path; tool arguments cannot override trust.
+    my $ca_file = $request->{caFile};
+    $ca_file = encode('UTF-8', $ca_file) if defined($ca_file);
+    die "Trusted CA bundle unavailable\n" unless defined($ca_file) && -f $ca_file && -r $ca_file && -s $ca_file;
     # -q is first: no .curlrc, explicit proxy, no bypass list, no redirects,
     # no retries to another route. CONNECT and hostname resolution use the proxy.
     exec '/usr/bin/curl', '-q', '--proxy', 'http://127.0.0.1:7897',
+      '--cacert', $ca_file,
       '--noproxy', '', '--proto', '=http,https', '--proto-redir', '=http,https',
       '--max-time', '30', '--max-filesize', '1048576', '--fail-with-body',
       '--silent', '--show-error', '--include', '--url', $url;

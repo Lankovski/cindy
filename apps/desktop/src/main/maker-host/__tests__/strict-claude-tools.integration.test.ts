@@ -9,7 +9,11 @@ import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const fault = vi.hoisted(() => ({ denyProxy: false, mockProxyPort: 0, caFile: '' }));
+const fault = vi.hoisted(() => ({ denyProxy: false, mockProxyPort: 0, roots: undefined as string[] | undefined }));
+vi.mock('node:tls', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:tls')>();
+  return { ...actual, get rootCertificates() { return fault.roots ?? actual.rootCertificates; } };
+});
 vi.mock('node:child_process', async importOriginal => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return { ...actual, spawn: vi.fn((command, argv, options) => {
@@ -26,7 +30,7 @@ vi.mock('node:child_process', async importOriginal => {
       args[1] = args[1].replaceAll('localhost:7897', `localhost:${fault.mockProxyPort}`);
       args[4] = args[4].replaceAll('http://127.0.0.1:7897', `http://127.0.0.1:${fault.mockProxyPort}`);
     }
-    return actual.spawn(command, args, fault.caFile ? { ...options, env: { ...options.env, CURL_CA_BUNDLE: fault.caFile } } : options);
+    return actual.spawn(command, args, options);
   }) };
 });
 import { runStrictClaudeTool } from '../strict-claude-tools.js';
@@ -38,7 +42,7 @@ const roots: string[] = [];
 afterEach(async () => {
   fault.denyProxy = false;
   fault.mockProxyPort = 0;
-  fault.caFile = '';
+  fault.roots = undefined;
   vi.restoreAllMocks();
   for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true });
 });
@@ -72,6 +76,14 @@ describe.skipIf(process.platform !== 'darwin')('strict Claude host tool sandbox'
     expect(await fs.readFile(path.join(f.project, 'protected'), 'utf8')).toBe('unchanged');
     await fs.mkdir(path.join(f.project, '.git'));
     await expect(runStrictClaudeTool(f.options, 'command', { command: 'echo bad > .git/config' })).rejects.toThrow();
+    // The same reserved-path rule protects per-fetch CA snapshots, even if
+    // another command's task directory contains their parent directory.
+    await fs.mkdir(path.join(f.project, '.cindy'));
+    const ca = path.join(f.project, '.cindy', 'web-fetch-ca.pem');
+    await fs.writeFile(ca, 'trusted snapshot', { mode: 0o400 });
+    await expect(runStrictClaudeTool(f.options, 'command', { command: 'chmod 600 .cindy/web-fetch-ca.pem && echo bad > .cindy/web-fetch-ca.pem' })).rejects.toThrow();
+    await expect(runStrictClaudeTool(f.options, 'command', { command: 'rm .cindy/web-fetch-ca.pem' })).rejects.toThrow();
+    expect(await fs.readFile(ca, 'utf8')).toBe('trusted snapshot');
     await fs.writeFile(path.join(f.home, 'outside-data'), 'unchanged');
     await expect(runStrictClaudeTool(f.options, 'command', { command: 'ln ../outside-data alias && echo bad > alias' })).rejects.toThrow();
     expect(await fs.readFile(path.join(f.home, 'outside-data'), 'utf8')).toBe('unchanged');
@@ -121,6 +133,10 @@ describe.skipIf(process.platform !== 'darwin')('strict Claude host tool sandbox'
   });
 
   it('verifies HTTPS certificates through a mock CONNECT proxy', async () => {
+    // Regression: live macOS sandbox curl could not use system trust services.
+    // Exercise the production host-created bundle, not a CURL_CA_BUNDLE test
+    // override. Integration tier: valid TLS succeeds, untrusted/expired/wrong
+    // hostname TLS fails, and missing roots fail before any proxy request.
     const f = await fixture();
     const key = path.join(f.root, 'key.pem'), cert = path.join(f.root, 'cert.pem');
     await promisify(execFile)('/usr/bin/openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=fixture.invalid', '-keyout', key, '-out', cert]);
@@ -141,11 +157,27 @@ describe.skipIf(process.platform !== 'darwin')('strict Claude host tool sandbox'
     });
     proxy.listen(0, '127.0.0.1'); await once(proxy, 'listening');
     fault.mockProxyPort = (proxy.address() as { port: number }).port;
-    fault.caFile = cert;
     try {
+      const trusted = await fs.readFile(cert, 'utf8');
+      await expect(runStrictClaudeTool(f.options, 'web_fetch', { url: 'https://fixture.invalid/offline', caFile: cert })).rejects.toThrow('Strict tool failed (60)');
+      expect(connects).toEqual(['fixture.invalid:443']);
+      connects.length = 0;
+      fault.roots = [];
+      await expect(runStrictClaudeTool(f.options, 'web_fetch', { url: 'https://fixture.invalid/offline' })).rejects.toThrow('Trusted CA bundle unavailable');
+      expect(connects).toEqual([]);
+      fault.roots = [trusted];
       await expect(runStrictClaudeTool(f.options, 'web_fetch', { url: 'https://fixture.invalid/offline' })).resolves.toContain('MOCK TLS RESPONSE');
       expect(connects).toEqual(['fixture.invalid:443']);
-      await expect(runStrictClaudeTool(f.options, 'web_fetch', { url: 'https://wrong.invalid/offline' })).rejects.toThrow();
+      await expect(runStrictClaudeTool(f.options, 'web_fetch', { url: 'https://wrong.invalid/offline' })).rejects.toThrow('Strict tool failed (60)');
+      const expired = path.join(f.root, 'expired.pem');
+      const csr = path.join(f.root, 'expired.csr'), config = path.join(f.root, 'ca.cnf');
+      await fs.writeFile(path.join(f.root, 'index'), '');
+      await fs.writeFile(path.join(f.root, 'serial'), '01\n');
+      await fs.writeFile(config, `[ca]\ndefault_ca=fixture\n[fixture]\ndatabase=${f.root}/index\nserial=${f.root}/serial\nnew_certs_dir=${f.root}\ndefault_md=sha256\npolicy=subject\n[subject]\ncommonName=supplied\n`);
+      await promisify(execFile)('/usr/bin/openssl', ['x509', '-x509toreq', '-in', cert, '-signkey', key, '-out', csr]);
+      await promisify(execFile)('/usr/bin/openssl', ['ca', '-batch', '-config', config, '-cert', cert, '-keyfile', key, '-in', csr, '-out', expired, '-startdate', '20000101000000Z', '-enddate', '20010101000000Z']);
+      target.setSecureContext({ key: await fs.readFile(key), cert: await fs.readFile(expired) });
+      await expect(runStrictClaudeTool(f.options, 'web_fetch', { url: 'https://fixture.invalid/offline' })).rejects.toThrow('Strict tool failed (60)');
     } finally {
       for (const socket of sockets) socket.destroy();
       await Promise.all([new Promise<void>(resolve => proxy.close(() => resolve())), new Promise<void>(resolve => target.close(() => resolve()))]);
